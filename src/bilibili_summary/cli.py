@@ -18,6 +18,9 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run-pending")
     run.add_argument("--limit", type=int, default=5)
     run.add_argument("--dry-run", action="store_true")
+    resumable = sub.add_parser("run-resumable")
+    resumable.add_argument("--limit", type=int, default=5)
+    resumable.add_argument("--dry-run", action="store_true")
     retry = sub.add_parser("retry-failed")
     retry.add_argument("--limit", type=int, default=5)
     retry.add_argument("--dry-run", action="store_true")
@@ -43,6 +46,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "run-pending":
         count = pipeline.run_pending(limit=args.limit, dry_run=args.dry_run)
+        print(f"processed: {count}")
+        return 0
+    if args.command == "run-resumable":
+        count = pipeline.run_resumable(limit=args.limit, dry_run=args.dry_run)
         print(f"processed: {count}")
         return 0
     if args.command == "retry-failed":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 import httpx
 
 from .bilibili import BilibiliClient
@@ -73,6 +74,16 @@ class Pipeline:
         jobs = self.store.list_by_status(JobStatus.FAILED, limit=limit)
         return self._run_rows(jobs, dry_run=dry_run)
 
+    def run_resumable(self, limit: int = 5, dry_run: bool = True) -> int:
+        jobs = self.store.list_by_status(
+            JobStatus.DISCOVERED,
+            JobStatus.AUDIO_DOWNLOADED,
+            JobStatus.TRANSCRIBED,
+            JobStatus.SUMMARIZED,
+            limit=limit,
+        )
+        return self._run_rows(jobs, dry_run=dry_run)
+
     def _run_rows(self, jobs: list[object], dry_run: bool = True) -> int:
         processed = 0
         for job in jobs:
@@ -82,6 +93,16 @@ class Pipeline:
 
     def run_job(self, job_id: int, bvid: str, dry_run: bool = True) -> None:
         try:
+            existing = self.store.get(job_id)
+            if existing and existing["status"] == JobStatus.AUDIO_DOWNLOADED.value:
+                self._transcribe_and_archive(existing, dry_run=dry_run)
+                return
+            if existing and existing["status"] == JobStatus.TRANSCRIBED.value:
+                self._summarize_and_archive(existing, dry_run=dry_run)
+                return
+            if existing and existing["status"] == JobStatus.SUMMARIZED.value:
+                self._archive_existing(existing, dry_run=dry_run)
+                return
             metadata = self.bilibili.get_metadata(bvid)
             if dry_run:
                 classification = self.llm.classify_food(metadata)
@@ -110,20 +131,54 @@ class Pipeline:
             audio_path = self.settings.download_dir / f"{bvid}.m4a"
             self.bilibili.download_audio(audio_url, audio_path)
             self.store.update(job_id, JobStatus.AUDIO_DOWNLOADED, audio_path=str(audio_path))
-
-            stt_text = self.stt.transcribe(audio_path)
-            self.store.update(job_id, JobStatus.TRANSCRIBED, stt_text=stt_text)
-
-            summary = self.llm.summarize(metadata, stt_text)
-            self.store.update(
-                job_id,
-                JobStatus.SUMMARIZED,
-                ai_title=summary.ai_title,
-                ai_html_content=summary.ai_html_content,
-                tags_json=json.dumps(summary.tags, ensure_ascii=False),
-            )
-
-            entry_id = self.wallabag.create_entry(metadata, summary, dry_run=dry_run)
-            self.store.update(job_id, JobStatus.ARCHIVED, wallabag_entry_id=entry_id)
+            self._transcribe_and_archive(self.store.get(job_id), dry_run=dry_run)
         except Exception as exc:
             self.store.fail(job_id, f"{type(exc).__name__}: {exc}")
+
+    def _metadata_from_row(self, row: object) -> VideoMetadata:
+        return VideoMetadata(
+            bvid=row["bvid"],
+            cid=row["cid"],
+            title=row["video_title"] or row["feed_title"] or row["bvid"],
+            cover_url=row["cover_url"],
+            owner_name=row["owner_name"],
+            category_name=row["category_name"],
+            description=None,
+            dynamic=None,
+        )
+
+    def _transcribe_and_archive(self, row: object | None, dry_run: bool = True) -> None:
+        if row is None:
+            raise RuntimeError("Cannot transcribe missing job row")
+        if not row["audio_path"]:
+            raise RuntimeError("Cannot transcribe job without audio_path")
+        audio_path = Path(row["audio_path"])
+        if not audio_path.is_absolute():
+            audio_path = self.settings.db_path.parent.parent / audio_path
+        stt_text = self.stt.transcribe(audio_path)
+        self.store.update(row["id"], JobStatus.TRANSCRIBED, stt_text=stt_text)
+        self._summarize_and_archive(self.store.get(row["id"]), dry_run=dry_run)
+
+    def _summarize_and_archive(self, row: object | None, dry_run: bool = True) -> None:
+        if row is None:
+            raise RuntimeError("Cannot resume missing job row")
+        metadata = self._metadata_from_row(row)
+        summary = self.llm.summarize(metadata, row["stt_text"] or "")
+        self.store.update(
+            row["id"],
+            JobStatus.SUMMARIZED,
+            ai_title=summary.ai_title,
+            ai_html_content=summary.ai_html_content,
+            tags_json=json.dumps(summary.tags, ensure_ascii=False),
+        )
+        self._archive_existing(self.store.get(row["id"]), dry_run=dry_run)
+
+    def _archive_existing(self, row: object | None, dry_run: bool = True) -> None:
+        if row is None:
+            raise RuntimeError("Cannot archive missing job row")
+        metadata = self._metadata_from_row(row)
+        from .models import SummaryResult
+
+        summary = SummaryResult(row["ai_title"] or metadata.title, row["ai_html_content"] or "暂无总结", json.loads(row["tags_json"] or "[]"))
+        entry_id = self.wallabag.create_entry(metadata, summary, dry_run=dry_run)
+        self.store.update(row["id"], JobStatus.ARCHIVED, wallabag_entry_id=entry_id, error_message=None)

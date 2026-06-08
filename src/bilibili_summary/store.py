@@ -76,6 +76,10 @@ class JobStore:
                 (*values, limit),
             ))
 
+    def get(self, job_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+
     def update(self, job_id: int, status: JobStatus | None = None, **fields: object) -> None:
         assignments = []
         values: list[object] = []
