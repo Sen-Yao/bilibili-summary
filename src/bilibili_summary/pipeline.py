@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import httpx
 
 from .bilibili import BilibiliClient
@@ -31,9 +32,7 @@ class Pipeline:
         self.watch_later = WatchLaterClient(settings.watch_later_url, settings.watch_later_token)
 
     def poll_once(self, dry_run: bool = True) -> int:
-        resp = httpx.get(self.settings.rss_feed_url, timeout=30)
-        resp.raise_for_status()
-        videos = parse_feed(resp.text)
+        videos = parse_feed(self._fetch_rss())
         inserted = 0
         if dry_run:
             return len(videos)
@@ -41,6 +40,30 @@ class Pipeline:
             if self.store.upsert_discovered(video):
                 inserted += 1
         return inserted
+
+    def _fetch_rss(self, attempts: int = 3) -> str:
+        last_error: Exception | None = None
+        headers = {
+            "User-Agent": self.settings.bilibili_user_agent,
+            "Referer": self.settings.bilibili_referer,
+        }
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = httpx.get(self.settings.rss_feed_url, headers=headers, timeout=30)
+                resp.raise_for_status()
+                return resp.text
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if exc.response.status_code not in {429, 500, 502, 503, 504} or attempt == attempts:
+                    break
+            except httpx.TransportError as exc:
+                last_error = exc
+                if attempt == attempts:
+                    break
+            time.sleep(2 ** (attempt - 1))
+        if last_error:
+            raise last_error
+        raise RuntimeError("RSS fetch failed without an error")
 
     def run_pending(self, limit: int = 5, dry_run: bool = True) -> int:
         jobs = self.store.list_by_status(JobStatus.DISCOVERED, limit=limit)
@@ -60,6 +83,13 @@ class Pipeline:
     def run_job(self, job_id: int, bvid: str, dry_run: bool = True) -> None:
         try:
             metadata = self.bilibili.get_metadata(bvid)
+            if dry_run:
+                classification = self.llm.classify_food(metadata)
+                if classification.is_food:
+                    self.watch_later.add(bvid, dry_run=True)
+                    return
+                self.bilibili.get_audio_url(bvid, metadata.cid)
+                return
             self.store.update(
                 job_id,
                 JobStatus.METADATA_FETCHED,
@@ -78,9 +108,6 @@ class Pipeline:
 
             audio_url = self.bilibili.get_audio_url(bvid, metadata.cid)
             audio_path = self.settings.download_dir / f"{bvid}.m4a"
-            if dry_run:
-                self.store.update(job_id, JobStatus.AUDIO_DOWNLOADED, audio_path=str(audio_path), error_message="dry-run: audio not downloaded")
-                return
             self.bilibili.download_audio(audio_url, audio_path)
             self.store.update(job_id, JobStatus.AUDIO_DOWNLOADED, audio_path=str(audio_path))
 
