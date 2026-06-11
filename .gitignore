@@ -8,3 +8,4 @@ data/
 downloads/
 .pytest_cache/
 .hermes/
+*.egg-info/

@@ -1,0 +1,22 @@
+services:
+  bilibili-summary:
+    image: bilibili-summary:local
+    build: .
+    container_name: bilibili-summary
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command: ["run-resumable", "--limit", "5"]
+    restart: "no"
+
+  bilibili-summary-poll:
+    image: bilibili-summary:local
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command: ["poll-once"]
+    profiles: ["manual"]
+    restart: "no"

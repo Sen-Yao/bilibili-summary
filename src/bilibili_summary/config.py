@@ -40,7 +40,7 @@ class Settings:
             download_dir=Path(os.getenv("DOWNLOAD_DIR", "data/downloads")),
             bilibili_user_agent=os.getenv("BILIBILI_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"),
             bilibili_referer=os.getenv("BILIBILI_REFERER", "https://www.bilibili.com"),
-            stt_base_url=os.getenv("STT_BASE_URL", "http://192.168.1.6:8000/v1"),
+            stt_base_url=_required("STT_BASE_URL"),
             stt_model=os.getenv("STT_MODEL", "deepdml/faster-whisper-large-v3-turbo-ct2"),
             llm_base_url=os.getenv("LLM_BASE_URL", ""),
             llm_api_key=os.getenv("LLM_API_KEY", ""),
