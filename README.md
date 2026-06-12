@@ -48,13 +48,32 @@ Copy `.env.example` to `.env` and fill in your private endpoints and credentials
 
 | Variable | Purpose |
 | --- | --- |
+Required:
+
+| Variable | Purpose |
+| --- | --- |
 | `RSS_FEED_URL` | RSSHub route for Bilibili following videos. |
-| `DB_PATH` | SQLite database path. |
-| `DOWNLOAD_DIR` | Audio download directory. |
-| `STT_BASE_URL` / `STT_MODEL` | OpenAI-compatible transcription endpoint and model. |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | OpenAI-compatible chat endpoint used for classification and article writing. |
-| `WALLABAG_*` | Wallabag OAuth credentials and target instance. |
-| `WATCH_LATER_URL` / `WATCH_LATER_TOKEN` | Optional bridge for videos that should be skipped and watched later. |
+| `STT_BASE_URL` | OpenAI-compatible transcription endpoint. |
+| `LLM_BASE_URL` / `LLM_API_KEY` | OpenAI-compatible chat endpoint and API key. |
+| `WALLABAG_BASE_URL` | Wallabag target instance. |
+| `WALLABAG_CLIENT_ID` / `WALLABAG_CLIENT_SECRET` | Wallabag OAuth client credentials. |
+| `WALLABAG_USERNAME` / `WALLABAG_PASSWORD` | Wallabag user credentials. |
+
+Optional:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DB_PATH` | `data/bilibili_summary.sqlite3` | SQLite database path. |
+| `DOWNLOAD_DIR` | `data/downloads` | Audio download directory. |
+| `KEEP_AUDIO_FILES` | `false` | Keep `.m4a` files after STT instead of deleting them. |
+| `LOG_LEVEL` | `INFO` | Docker-friendly log level: `DEBUG`, `INFO`, or `ERROR`. |
+| `STT_MODEL` | `deepdml/faster-whisper-large-v3-turbo-ct2` | Speech-to-text model. |
+| `LLM_MODEL` | `glm-5` | Chat model used for classification and article writing. |
+| `WATCH_LATER_URL` / `WATCH_LATER_TOKEN` | unset | Optional bridge for food/cooking videos. |
+
+`WATCH_LATER_URL` is optional. When a video is classified as food/cooking, the pipeline skips summarization and calls `GET {WATCH_LATER_URL}?bvid=<BVID>`. If `WATCH_LATER_TOKEN` is set, it is sent as `X-Api-Token`. When the URL is unset, the job is still marked `skipped`, but no external watch-later action is taken.
+
+Downloads are written as `.part` files first and atomically renamed to `.m4a` after a successful download. By default, audio files are deleted after STT succeeds. Set `KEEP_AUDIO_FILES=true` only when you intentionally want to retain audio.
 
 Never commit `.env`, cookies, downloaded audio, SQLite databases, or generated logs. The repository ignore rules and Docker examples are designed around that assumption.
 
@@ -67,9 +86,11 @@ bilibili-summary run-pending [--limit 5] [--dry-run]
 bilibili-summary run-resumable [--limit 5] [--dry-run]
 bilibili-summary retry-failed [--limit 5] [--dry-run]
 bilibili-summary show-jobs [--status discovered|failed|archived] [--limit 20]
+bilibili-summary cleanup-downloads [--dry-run]
 ```
 
 Use `run-resumable` for routine operation. It continues jobs from discovered, audio-downloaded, transcribed, and summarized states.
+Use `cleanup-downloads --dry-run` to inspect removable `.part` files and audio files that are no longer needed.
 
 ## Docker
 
@@ -89,7 +110,7 @@ docker run --rm \
   run-resumable --limit 5
 ```
 
-For a scheduler-friendly example, see `compose.example.yml` and `docs/deployment.md`.
+For a scheduler-friendly example, see `compose.example.yml` and `docs/deployment.md`. If your STT service runs on the Docker host, configure `STT_BASE_URL` with the host address reachable from containers.
 
 ## RSSHub Cookie Automation
 
@@ -105,6 +126,10 @@ pytest
 ```
 
 The test suite covers RSS parsing, retry behavior, SQLite job state, Wallabag dry-run behavior, and LLM JSON extraction.
+
+## Logs
+
+The CLI writes structured text logs to stdout, so Docker and Unraid can collect them with `docker logs`. Set `LOG_LEVEL=DEBUG` for verbose diagnostics or `LOG_LEVEL=ERROR` for quieter scheduled runs. Logs include job ids, BVIDs, status transitions, cleanup counts, and exception traces; they do not print API keys, cookies, or `.env` contents.
 
 ## Security
 

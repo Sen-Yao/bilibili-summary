@@ -51,9 +51,18 @@ class BilibiliClient:
 
     def download_audio(self, url: str, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with httpx.stream("GET", url, headers=self.headers, timeout=120) as resp:
-            resp.raise_for_status()
-            with destination.open("wb") as file:
-                for chunk in resp.iter_bytes():
-                    file.write(chunk)
+        partial = destination.with_name(f"{destination.name}.part")
+        if partial.exists():
+            partial.unlink()
+        try:
+            with httpx.stream("GET", url, headers=self.headers, timeout=120) as resp:
+                resp.raise_for_status()
+                with partial.open("wb") as file:
+                    for chunk in resp.iter_bytes():
+                        file.write(chunk)
+        except Exception:
+            if partial.exists():
+                partial.unlink()
+            raise
+        partial.replace(destination)
         return destination

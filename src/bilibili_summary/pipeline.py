@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 import httpx
@@ -14,6 +15,8 @@ from .store import JobStore
 from .stt import STTClient
 from .wallabag import WallabagClient
 from .watch_later import WatchLaterClient
+
+logger = logging.getLogger(__name__)
 
 
 class Pipeline:
@@ -34,12 +37,14 @@ class Pipeline:
 
     def poll_once(self, dry_run: bool = True) -> int:
         videos = parse_feed(self._fetch_rss())
+        logger.info("rss poll completed videos=%s dry_run=%s", len(videos), dry_run)
         inserted = 0
         if dry_run:
             return len(videos)
         for video in videos:
             if self.store.upsert_discovered(video):
                 inserted += 1
+        logger.info("rss poll inserted=%s", inserted)
         return inserted
 
     def _fetch_rss(self, attempts: int = 3) -> str:
@@ -89,9 +94,11 @@ class Pipeline:
         for job in jobs:
             self.run_job(job["id"], job["bvid"], dry_run=dry_run)
             processed += 1
+        logger.info("job batch completed processed=%s dry_run=%s", processed, dry_run)
         return processed
 
     def run_job(self, job_id: int, bvid: str, dry_run: bool = True) -> None:
+        logger.info("job start id=%s bvid=%s dry_run=%s", job_id, bvid, dry_run)
         try:
             existing = self.store.get(job_id)
             if existing and existing["status"] == JobStatus.AUDIO_DOWNLOADED.value:
@@ -104,6 +111,7 @@ class Pipeline:
                 self._archive_existing(existing, dry_run=dry_run)
                 return
             metadata = self.bilibili.get_metadata(bvid)
+            logger.info("metadata fetched id=%s bvid=%s title=%s", job_id, bvid, metadata.title)
             if dry_run:
                 classification = self.llm.classify_food(metadata)
                 if classification.is_food:
@@ -122,17 +130,22 @@ class Pipeline:
             )
             classification = self.llm.classify_food(metadata)
             self.store.update(job_id, JobStatus.CLASSIFIED, is_food=1 if classification.is_food else 0)
+            logger.info("classification completed id=%s bvid=%s is_food=%s", job_id, bvid, classification.is_food)
             if classification.is_food:
                 result = self.watch_later.add(bvid, dry_run=dry_run)
                 self.store.update(job_id, JobStatus.SKIPPED, error_message=f"watch_later={result}; reason={classification.reason}")
+                logger.info("job skipped id=%s bvid=%s watch_later=%s", job_id, bvid, result)
                 return
 
             audio_url = self.bilibili.get_audio_url(bvid, metadata.cid)
             audio_path = self.settings.download_dir / f"{bvid}.m4a"
+            logger.info("audio download start id=%s bvid=%s path=%s", job_id, bvid, audio_path)
             self.bilibili.download_audio(audio_url, audio_path)
             self.store.update(job_id, JobStatus.AUDIO_DOWNLOADED, audio_path=str(audio_path))
+            logger.info("audio download completed id=%s bvid=%s path=%s", job_id, bvid, audio_path)
             self._transcribe_and_archive(self.store.get(job_id), dry_run=dry_run)
         except Exception as exc:
+            logger.exception("job failed id=%s bvid=%s", job_id, bvid)
             self.store.fail(job_id, f"{type(exc).__name__}: {exc}")
 
     def _metadata_from_row(self, row: object) -> VideoMetadata:
@@ -155,14 +168,20 @@ class Pipeline:
         audio_path = Path(row["audio_path"])
         if not audio_path.is_absolute():
             audio_path = self.settings.db_path.parent.parent / audio_path
+        logger.info("stt start id=%s bvid=%s path=%s", row["id"], row["bvid"], audio_path)
         stt_text = self.stt.transcribe(audio_path)
         self.store.update(row["id"], JobStatus.TRANSCRIBED, stt_text=stt_text)
+        logger.info("stt completed id=%s bvid=%s chars=%s", row["id"], row["bvid"], len(stt_text))
+        if not self.settings.keep_audio_files:
+            self._delete_file(audio_path)
+            logger.info("audio deleted id=%s bvid=%s path=%s", row["id"], row["bvid"], audio_path)
         self._summarize_and_archive(self.store.get(row["id"]), dry_run=dry_run)
 
     def _summarize_and_archive(self, row: object | None, dry_run: bool = True) -> None:
         if row is None:
             raise RuntimeError("Cannot resume missing job row")
         metadata = self._metadata_from_row(row)
+        logger.info("summary start id=%s bvid=%s", row["id"], row["bvid"])
         summary = self.llm.summarize(metadata, row["stt_text"] or "")
         self.store.update(
             row["id"],
@@ -171,6 +190,7 @@ class Pipeline:
             ai_html_content=summary.ai_html_content,
             tags_json=json.dumps(summary.tags, ensure_ascii=False),
         )
+        logger.info("summary completed id=%s bvid=%s title=%s", row["id"], row["bvid"], summary.ai_title)
         self._archive_existing(self.store.get(row["id"]), dry_run=dry_run)
 
     def _archive_existing(self, row: object | None, dry_run: bool = True) -> None:
@@ -180,5 +200,43 @@ class Pipeline:
         from .models import SummaryResult
 
         summary = SummaryResult(row["ai_title"] or metadata.title, row["ai_html_content"] or "暂无总结", json.loads(row["tags_json"] or "[]"))
+        logger.info("archive start id=%s bvid=%s dry_run=%s", row["id"], row["bvid"], dry_run)
         entry_id = self.wallabag.create_entry(metadata, summary, dry_run=dry_run)
         self.store.update(row["id"], JobStatus.ARCHIVED, wallabag_entry_id=entry_id, error_message=None)
+        logger.info("archive completed id=%s bvid=%s entry_id=%s", row["id"], row["bvid"], entry_id)
+
+    def cleanup_downloads(self, dry_run: bool = True) -> list[Path]:
+        candidates: list[Path] = []
+        download_dir = self.settings.download_dir
+        if not download_dir.exists():
+            logger.info("cleanup skipped missing_download_dir=%s", download_dir)
+            return candidates
+
+        candidates.extend(sorted(download_dir.glob("*.part")))
+        protected = {
+            self._resolve_audio_path(row["audio_path"])
+            for row in self.store.list_by_status(JobStatus.AUDIO_DOWNLOADED, limit=100000)
+            if row["audio_path"]
+        }
+        for audio in sorted(download_dir.glob("*.m4a")):
+            if audio.resolve() not in protected:
+                candidates.append(audio)
+
+        if not dry_run:
+            for path in candidates:
+                self._delete_file(path)
+        logger.info("cleanup completed dry_run=%s candidates=%s", dry_run, len(candidates))
+        return candidates
+
+    def _resolve_audio_path(self, audio_path: str) -> Path:
+        path = Path(audio_path)
+        if not path.is_absolute():
+            path = self.settings.db_path.parent.parent / path
+        return path.resolve()
+
+    @staticmethod
+    def _delete_file(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return

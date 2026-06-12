@@ -29,6 +29,8 @@ class Settings:
     wallabag_password: str
     watch_later_url: str | None
     watch_later_token: str | None
+    keep_audio_files: bool
+    log_level: str
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "Settings":
@@ -52,6 +54,8 @@ class Settings:
             wallabag_password=os.getenv("WALLABAG_PASSWORD", ""),
             watch_later_url=os.getenv("WATCH_LATER_URL"),
             watch_later_token=os.getenv("WATCH_LATER_TOKEN"),
+            keep_audio_files=_bool_env("KEEP_AUDIO_FILES", default=False),
+            log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
 
 
@@ -60,3 +64,10 @@ def _required(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}

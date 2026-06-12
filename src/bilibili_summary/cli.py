@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from .config import Settings
+from .logging_utils import configure_logging
 from .models import JobStatus
 from .pipeline import Pipeline
 from .store import JobStore
@@ -27,12 +28,15 @@ def build_parser() -> argparse.ArgumentParser:
     show = sub.add_parser("show-jobs")
     show.add_argument("--status", choices=[s.value for s in JobStatus])
     show.add_argument("--limit", type=int, default=20)
+    cleanup = sub.add_parser("cleanup-downloads")
+    cleanup.add_argument("--dry-run", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = Settings.from_env(args.env_file)
+    configure_logging(settings.log_level)
     store = JobStore(settings.db_path)
     if args.command == "init-db":
         store.init_db()
@@ -60,6 +64,13 @@ def main(argv: list[str] | None = None) -> int:
         statuses = [JobStatus(args.status)] if args.status else list(JobStatus)
         for row in store.list_by_status(*statuses, limit=args.limit):
             print(f"#{row['id']} {row['status']} {row['bvid']} {row['video_title'] or row['feed_title'] or ''} {row['error_message'] or ''}")
+        return 0
+    if args.command == "cleanup-downloads":
+        paths = pipeline.cleanup_downloads(dry_run=args.dry_run)
+        action = "would remove" if args.dry_run else "removed"
+        for path in paths:
+            print(f"{action}: {path}")
+        print(f"{action}: {len(paths)} files")
         return 0
     raise AssertionError(args.command)
 
