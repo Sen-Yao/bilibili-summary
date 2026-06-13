@@ -31,6 +31,7 @@ class Settings:
     watch_later_token: str | None
     keep_audio_files: bool
     log_level: str
+    api_token: str | None
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "Settings":
@@ -56,6 +57,7 @@ class Settings:
             watch_later_token=os.getenv("WATCH_LATER_TOKEN"),
             keep_audio_files=_bool_env("KEEP_AUDIO_FILES", default=False),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            api_token=os.getenv("API_TOKEN"),
         )
 
 

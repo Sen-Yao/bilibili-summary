@@ -9,8 +9,8 @@ import httpx
 from .bilibili import BilibiliClient
 from .config import Settings
 from .llm import LLMClient
-from .models import JobStatus, VideoMetadata
-from .rss import parse_feed
+from .models import FeedVideo, JobStatus, VideoMetadata
+from .rss import extract_bvid, parse_feed
 from .store import JobStore
 from .stt import STTClient
 from .wallabag import WallabagClient
@@ -46,6 +46,46 @@ class Pipeline:
                 inserted += 1
         logger.info("rss poll inserted=%s", inserted)
         return inserted
+
+    def enqueue_video(self, video: str) -> dict[str, object]:
+        bvid = extract_bvid(video)
+        if not bvid:
+            raise ValueError(f"Could not find a BVID in: {video}")
+        source_url = video if video.startswith(("http://", "https://")) else f"https://www.bilibili.com/video/{bvid}"
+        job_id, created = self.store.enqueue_video(FeedVideo(bvid=bvid, url=source_url, guid=f"manual:{bvid}"))
+        row = self.store.get(job_id)
+        status = row["status"] if row else JobStatus.DISCOVERED.value
+        logger.info("manual video enqueued id=%s bvid=%s created=%s status=%s", job_id, bvid, created, status)
+        return {"job_id": job_id, "bvid": bvid, "created": created, "status": status}
+
+    def process_video(self, video: str, dry_run: bool = True, run_now: bool = False, force: bool = False) -> dict[str, object]:
+        result = self.enqueue_video(video)
+        if run_now and self._should_run_manual_status(str(result["status"]), force=force):
+            self.run_job(int(result["job_id"]), str(result["bvid"]), dry_run=dry_run, force=force)
+            row = self.store.get(int(result["job_id"]))
+            result["status"] = row["status"] if row else result["status"]
+        logger.info(
+            "manual video processed id=%s bvid=%s run_now=%s dry_run=%s force=%s status=%s",
+            result["job_id"],
+            result["bvid"],
+            run_now,
+            dry_run,
+            force,
+            result["status"],
+        )
+        return result
+
+    @staticmethod
+    def _should_run_manual_status(status: str, force: bool = False) -> bool:
+        if force:
+            return True
+        return status in {
+            JobStatus.DISCOVERED.value,
+            JobStatus.AUDIO_DOWNLOADED.value,
+            JobStatus.TRANSCRIBED.value,
+            JobStatus.SUMMARIZED.value,
+            JobStatus.FAILED.value,
+        }
 
     def _fetch_rss(self, attempts: int = 3) -> str:
         last_error: Exception | None = None
@@ -97,8 +137,8 @@ class Pipeline:
         logger.info("job batch completed processed=%s dry_run=%s", processed, dry_run)
         return processed
 
-    def run_job(self, job_id: int, bvid: str, dry_run: bool = True) -> None:
-        logger.info("job start id=%s bvid=%s dry_run=%s", job_id, bvid, dry_run)
+    def run_job(self, job_id: int, bvid: str, dry_run: bool = True, force: bool = False) -> None:
+        logger.info("job start id=%s bvid=%s dry_run=%s force=%s", job_id, bvid, dry_run, force)
         try:
             existing = self.store.get(job_id)
             if existing and existing["status"] == JobStatus.AUDIO_DOWNLOADED.value:
@@ -114,7 +154,7 @@ class Pipeline:
             logger.info("metadata fetched id=%s bvid=%s title=%s", job_id, bvid, metadata.title)
             if dry_run:
                 classification = self.llm.classify_food(metadata)
-                if classification.is_food:
+                if classification.is_food and not force:
                     self.watch_later.add(bvid, dry_run=True)
                     return
                 self.bilibili.get_audio_url(bvid, metadata.cid)
@@ -131,11 +171,14 @@ class Pipeline:
             classification = self.llm.classify_food(metadata)
             self.store.update(job_id, JobStatus.CLASSIFIED, is_food=1 if classification.is_food else 0)
             logger.info("classification completed id=%s bvid=%s is_food=%s", job_id, bvid, classification.is_food)
-            if classification.is_food:
+            if classification.is_food and not force:
                 result = self.watch_later.add(bvid, dry_run=dry_run)
                 self.store.update(job_id, JobStatus.SKIPPED, error_message=f"watch_later={result}; reason={classification.reason}")
                 logger.info("job skipped id=%s bvid=%s watch_later=%s", job_id, bvid, result)
                 return
+            if classification.is_food and force:
+                logger.info("food classification overridden id=%s bvid=%s reason=%s", job_id, bvid, classification.reason)
+
 
             audio_url = self.bilibili.get_audio_url(bvid, metadata.cid)
             audio_path = self.settings.download_dir / f"{bvid}.m4a"

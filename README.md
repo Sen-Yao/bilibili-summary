@@ -70,6 +70,7 @@ Optional:
 | `STT_MODEL` | `deepdml/faster-whisper-large-v3-turbo-ct2` | Speech-to-text model. |
 | `LLM_MODEL` | `glm-5` | Chat model used for classification and article writing. |
 | `WATCH_LATER_URL` / `WATCH_LATER_TOKEN` | unset | Optional bridge for food/cooking videos. |
+| `API_TOKEN` | unset | Required when running the HTTP agent API. Use a long random value. |
 
 `WATCH_LATER_URL` is optional. When a video is classified as food/cooking, the pipeline skips summarization and calls `GET {WATCH_LATER_URL}?bvid=<BVID>`. If `WATCH_LATER_TOKEN` is set, it is sent as `X-Api-Token`. When the URL is unset, the job is still marked `skipped`, but no external watch-later action is taken.
 
@@ -87,10 +88,13 @@ bilibili-summary run-resumable [--limit 5] [--dry-run]
 bilibili-summary retry-failed [--limit 5] [--dry-run]
 bilibili-summary show-jobs [--status discovered|failed|archived] [--limit 20]
 bilibili-summary cleanup-downloads [--dry-run]
+bilibili-summary process-video <BVID-or-URL> [--dry-run] [--run-now] [--force]
 ```
 
 Use `run-resumable` for routine operation. It continues jobs from discovered, audio-downloaded, transcribed, and summarized states.
 Use `cleanup-downloads --dry-run` to inspect removable `.part` files and audio files that are no longer needed.
+
+Use `process-video` when an agent or operator wants to submit a specific Bilibili video outside the RSS feed. By default it creates or reuses a SQLite job and returns immediately. Add `--run-now` to process the video in the same command. Manual videos follow the same food/cooking skip policy as RSS jobs; add `--force` to continue transcription and archiving even when the classifier marks the video as food/cooking.
 
 ## Docker
 
@@ -111,6 +115,31 @@ docker run --rm \
 ```
 
 For a scheduler-friendly example, see `compose.example.yml` and `docs/deployment.md`. If your STT service runs on the Docker host, configure `STT_BASE_URL` with the host address reachable from containers.
+
+## Agent API
+
+Run the HTTP API from the same image when another agent should submit specific videos:
+
+```bash
+docker run -d \
+  --name bilibili-summary-api \
+  --env-file .env \
+  -p 18766:8000 \
+  -v "$PWD/data:/app/data" \
+  --entrypoint bilibili-summary-api \
+  bilibili-summary:local
+```
+
+Set `API_TOKEN` in your private env file before exposing the service. Non-health endpoints require `Authorization: Bearer <API_TOKEN>`.
+
+```bash
+curl -H "Authorization: Bearer $API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"video":"https://www.bilibili.com/video/BV1xx411c7mD","run_now":false}' \
+  http://127.0.0.1:18766/api/videos/process
+```
+
+`POST /api/videos/process` accepts `video`, `run_now`, `dry_run`, and `force`. The default is to enqueue only; set `run_now=true` for synchronous processing. If you publish the API through a tunnel or reverse proxy, keep the bearer token private and rotate it if logs, shells, or clients may have exposed it.
 
 ## RSSHub Cookie Automation
 

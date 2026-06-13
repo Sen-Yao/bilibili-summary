@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--limit", type=int, default=20)
     cleanup = sub.add_parser("cleanup-downloads")
     cleanup.add_argument("--dry-run", action="store_true")
+    process = sub.add_parser("process-video")
+    process.add_argument("video")
+    process.add_argument("--dry-run", action="store_true")
+    process.add_argument("--run-now", action="store_true")
+    process.add_argument("--force", action="store_true")
     return parser
 
 
@@ -71,6 +76,13 @@ def main(argv: list[str] | None = None) -> int:
         for path in paths:
             print(f"{action}: {path}")
         print(f"{action}: {len(paths)} files")
+        return 0
+    if args.command == "process-video":
+        result = pipeline.process_video(args.video, dry_run=args.dry_run, run_now=args.run_now, force=args.force)
+        print(
+            f"job #{result['job_id']} {result['bvid']} "
+            f"{'created' if result['created'] else 'existing'} status={result['status']}"
+        )
         return 0
     raise AssertionError(args.command)
 

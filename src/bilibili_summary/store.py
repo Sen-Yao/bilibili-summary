@@ -67,6 +67,20 @@ class JobStore:
             )
             return cur.rowcount > 0
 
+    def enqueue_video(self, video: FeedVideo) -> tuple[int, bool]:
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO jobs (bvid, source_url, feed_guid, feed_title, published_at, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (video.bvid, video.url, video.guid, video.title, video.published, JobStatus.DISCOVERED.value),
+            )
+            row = conn.execute("SELECT id FROM jobs WHERE bvid = ?", (video.bvid,)).fetchone()
+            if row is None:
+                raise RuntimeError(f"Failed to enqueue video: {video.bvid}")
+            return int(row["id"]), cur.rowcount > 0
+
     def list_by_status(self, *statuses: JobStatus, limit: int = 20) -> list[sqlite3.Row]:
         values = [s.value for s in statuses]
         placeholders = ",".join("?" for _ in values)

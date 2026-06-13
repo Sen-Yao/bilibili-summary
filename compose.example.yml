@@ -20,3 +20,17 @@ services:
     command: ["poll-once"]
     profiles: ["manual"]
     restart: "no"
+
+
+  bilibili-summary-api:
+    image: bilibili-summary:local
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "18766:8000"
+    entrypoint: ["bilibili-summary-api"]
+    restart: unless-stopped
+    profiles: ["api"]
